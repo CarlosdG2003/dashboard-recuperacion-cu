@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import os
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
@@ -17,13 +18,18 @@ st.set_page_config(
 )
 
 def load_and_process_data(file_path):
-    """Carga y procesa datos del archivo"""
+    """Carga y procesa datos desde CSV o Excel"""
     try:
         df = pd.read_csv(file_path) if file_path.endswith('.csv') else pd.read_excel(file_path)
         df['ts_origin'] = pd.to_datetime(df['ts_origin'])
         df['ts'] = pd.to_datetime(df['ts'])
         
-        copper_tags = ['PowerBi.COU1CD2001CU', 'PowerBi.COU1RD001CU', 'PowerBi.COU1CF001CU', 'PowerBi.COU1-RCT-CU']
+        copper_tags = [
+            'PowerBi.COU1CD2001CU',
+            'PowerBi.COU1RD001CU',
+            'PowerBi.COU1CF001CU',
+            'PowerBi.COU1-RCT-CU'
+        ]
         return df[df['tag_id'].isin(copper_tags)].copy()
     except Exception as e:
         st.error(f"Error al cargar el archivo: {e}")
@@ -315,46 +321,60 @@ def load_data_cached(_file_content, filename):
 
 def main():
     st.sidebar.header("Cargar Datos")
-    
-    uploaded_file = st.sidebar.file_uploader("Archivo de datos SCADA:", type=['csv', 'xlsx', 'xls'],
-                                            help="Formatos soportados: CSV, Excel")
-    
-    if uploaded_file is not None:
-        with st.spinner("Procesando datos..."):
-            df_final, raw_count = load_data_cached(uploaded_file.getbuffer(), uploaded_file.name)
-            
-            if df_final is not None:
-                st.success(f"Datos cargados: {len(df_final)} bloques de 15 min procesados")
-                
-                # Info del dataset
-                st.sidebar.write("**Dataset Info:**")
-                st.sidebar.write(f"• Registros originales: {raw_count:,}")
-                st.sidebar.write(f"• Bloques 15min: {len(df_final):,}")
-                st.sidebar.write(f"• Período: {df_final['time_block'].min().strftime('%d/%m/%Y')} - {df_final['time_block'].max().strftime('%d/%m/%Y')}")
-                
-                create_dashboard(df_final)
-        
-        # Limpiar archivo temporals
-        try:
-            import os
-            os.remove(f"temp_{uploaded_file.name}")
-        except:
-            pass
+
+    DATA_DIR = "/app/data"
+    local_files = [f for f in os.listdir(DATA_DIR) if f.endswith((".csv", ".xlsx"))]
+
+    option = st.sidebar.radio("Fuente de datos:", ["Archivos en servidor", "Subir archivo"])
+
+    df_final, raw_count = None, 0
+
+    if option == "Archivos en servidor":
+        if local_files:
+            selected_file = st.sidebar.selectbox("Selecciona archivo:", local_files)
+            if selected_file:
+                file_path = os.path.join(DATA_DIR, selected_file)
+                with st.spinner("Procesando datos..."):
+                    df_raw = load_and_process_data(file_path)
+                    if df_raw is not None:
+                        df_blocks = create_15min_blocks(df_raw)
+                        df_final = calculate_manual_recovery(df_blocks)
+                        raw_count = len(df_raw)
+        else:
+            st.error("No hay archivos en la carpeta /app/data")
+
+    elif option == "Subir archivo":
+        uploaded_file = st.sidebar.file_uploader("Archivo de datos SCADA:", type=['csv', 'xlsx', 'xls'],
+                                                help="Formatos soportados: CSV, Excel")
+        if uploaded_file is not None:
+            with st.spinner("Procesando datos..."):
+                df_final, raw_count = load_data_cached(uploaded_file.getbuffer(), uploaded_file.name)
+
+    # Mostrar dashboard si hay datos
+    if df_final is not None:
+        st.success(f"Datos cargados: {len(df_final)} bloques de 15 min procesados")
+
+        st.sidebar.write("**Dataset Info:**")
+        st.sidebar.write(f"• Registros originales: {raw_count:,}")
+        st.sidebar.write(f"• Bloques 15min: {len(df_final):,}")
+        st.sidebar.write(f"• Período: {df_final['time_block'].min().strftime('%d/%m/%Y')} - {df_final['time_block'].max().strftime('%d/%m/%Y')}")
+
+        create_dashboard(df_final)
     else:
-        st.info("Sube un archivo para comenzar el análisis")
-        
+        st.info("Selecciona o sube un archivo para comenzar el análisis")
+
         with st.expander("Información del Sistema"):
             st.markdown("""
             **Función:** Análisis de discrepancias entre recuperación calculada vs sistema SCADA
-            
+
             **Fórmula:** [[(COU1CD2001 - COU1RD001) * COU1CF001] / [ (COU1CF001 - COU1RD001) * COU1CD2001]] *100
-            
+
             **Tags requeridos:**
             - COU1CD2001CU 
             - COU1RD001CU (Se divide por 10,000)
             - COU1CF001CU 
             - COU1-RCT-CU (Recuperación sistema)
-            
+
             **Impacto:** 0.1% diferencia = miles de euros en pérdidas
             """)
 
