@@ -5,10 +5,17 @@ import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 import warnings
 warnings.filterwarnings('ignore')
+
+# Importar DuckDB solo si está disponible
+try:
+    import duckdb
+    DUCKDB_AVAILABLE = True
+except ImportError:
+    DUCKDB_AVAILABLE = False
 
 st.set_page_config(
     page_title="Panel de Control - Recuperación Cu | Atalaya Mining",
@@ -33,6 +40,40 @@ def load_and_process_data(file_path):
         return df[df['tag_id'].isin(copper_tags)].copy()
     except Exception as e:
         st.error(f"Error al cargar el archivo: {e}")
+        return None
+
+@st.cache_data(ttl=900)  # Cache 15 minutos
+def load_from_duckdb(days_back=30, db_path="/app/data/scada_recovery.duckdb"):
+    """Carga datos desde DuckDB"""
+    if not DUCKDB_AVAILABLE:
+        return None
+        
+    try:
+        conn = duckdb.connect(db_path)
+        
+        query = f"""
+        SELECT 
+            ts_origin,
+            tag_id,
+            value_ts
+        FROM copper_data 
+        WHERE ts_origin >= current_date - interval '{days_back} days'
+        AND tag_id IN ('PowerBi.COU1CD2001CU', 'PowerBi.COU1RD001CU', 
+                       'PowerBi.COU1CF001CU', 'PowerBi.COU1-RCT-CU')
+        ORDER BY ts_origin, tag_id
+        """
+        
+        df = conn.execute(query).df()
+        conn.close()
+        
+        if len(df) > 0:
+            df['ts_origin'] = pd.to_datetime(df['ts_origin'])
+            df['ts'] = df['ts_origin']
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Error conectando a DuckDB: {e}")
         return None
 
 def create_15min_blocks(df):
@@ -323,25 +364,50 @@ def main():
     st.sidebar.header("Cargar Datos")
 
     DATA_DIR = "/app/data"
-    local_files = [f for f in os.listdir(DATA_DIR) if f.endswith((".csv", ".xlsx"))]
-
-    option = st.sidebar.radio("Fuente de datos:", ["Archivos en servidor", "Subir archivo"])
-
+    
+    # Verificar qué opciones están disponibles
+    local_files = [f for f in os.listdir(DATA_DIR) if f.endswith((".csv", ".xlsx"))] if os.path.exists(DATA_DIR) else []
+    duckdb_exists = DUCKDB_AVAILABLE and os.path.exists(os.path.join(DATA_DIR, "scada_recovery.duckdb"))
+    
+    # Crear opciones
+    options = []
+    if duckdb_exists:
+        options.append("Base de datos DuckDB")
+    if local_files:
+        options.append("Archivos en servidor")
+    options.append("Subir archivo")
+    
+    option = st.sidebar.radio("Fuente de datos:", options)
+    
     df_final, raw_count = None, 0
 
-    if option == "Archivos en servidor":
-        if local_files:
-            selected_file = st.sidebar.selectbox("Selecciona archivo:", local_files)
-            if selected_file:
-                file_path = os.path.join(DATA_DIR, selected_file)
-                with st.spinner("Procesando datos..."):
-                    df_raw = load_and_process_data(file_path)
-                    if df_raw is not None:
-                        df_blocks = create_15min_blocks(df_raw)
-                        df_final = calculate_manual_recovery(df_blocks)
-                        raw_count = len(df_raw)
-        else:
-            st.error("No hay archivos en la carpeta /app/data")
+    if option == "Base de datos DuckDB" and duckdb_exists:
+        # Selector de días de histórico para DuckDB
+        days_back = st.sidebar.selectbox("Días de histórico:", [7, 15, 30, 60, 90], index=2)
+        
+        # Botón para refrescar datos
+        if st.sidebar.button("Actualizar datos"):
+            st.cache_data.clear()
+        
+        with st.spinner("Cargando datos desde DuckDB..."):
+            df_raw = load_from_duckdb(days_back)
+            if df_raw is not None and len(df_raw) > 0:
+                df_blocks = create_15min_blocks(df_raw)
+                df_final = calculate_manual_recovery(df_blocks)
+                raw_count = len(df_raw)
+            else:
+                st.error("No se encontraron datos en DuckDB")
+
+    elif option == "Archivos en servidor" and local_files:
+        selected_file = st.sidebar.selectbox("Selecciona archivo:", local_files)
+        if selected_file:
+            file_path = os.path.join(DATA_DIR, selected_file)
+            with st.spinner("Procesando datos..."):
+                df_raw = load_and_process_data(file_path)
+                if df_raw is not None:
+                    df_blocks = create_15min_blocks(df_raw)
+                    df_final = calculate_manual_recovery(df_blocks)
+                    raw_count = len(df_raw)
 
     elif option == "Subir archivo":
         uploaded_file = st.sidebar.file_uploader("Archivo de datos SCADA:", type=['csv', 'xlsx', 'xls'],
@@ -358,10 +424,18 @@ def main():
         st.sidebar.write(f"• Registros originales: {raw_count:,}")
         st.sidebar.write(f"• Bloques 15min: {len(df_final):,}")
         st.sidebar.write(f"• Período: {df_final['time_block'].min().strftime('%d/%m/%Y')} - {df_final['time_block'].max().strftime('%d/%m/%Y')}")
+        
+        # Mostrar fuente de datos
+        if option == "Base de datos DuckDB":
+            st.sidebar.success("Fuente: DuckDB")
+        elif option == "Archivos en servidor":
+            st.sidebar.info("Fuente: Archivo local")
+        else:
+            st.sidebar.info("Fuente: Archivo subido")
 
         create_dashboard(df_final)
     else:
-        st.info("Selecciona o sube un archivo para comenzar el análisis")
+        st.info("Selecciona una fuente de datos para comenzar el análisis")
 
         with st.expander("Información del Sistema"):
             st.markdown("""
@@ -375,8 +449,16 @@ def main():
             - COU1CF001CU 
             - COU1-RCT-CU (Recuperación sistema)
 
-            **Impacto:** 0.1% diferencia = miles de euros en pérdidas
+            **Fuentes disponibles:**
             """)
+            
+            if duckdb_exists:
+                st.write("- Base de datos DuckDB (recomendado)")
+            if local_files:
+                st.write("- Archivos en servidor")
+            st.write("- Subir archivo manual")
+            
+            st.write("**Impacto:** 0.1% diferencia = miles de euros en pérdidas")
 
 if __name__ == "__main__":
     main()

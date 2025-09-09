@@ -26,8 +26,5 @@ Recuperación = [[(COU1CD2001 - COU1RD001) * COU1CF001] / [ (COU1CF001 - COU1RD0
 git clone https://github.com/CarlosdG2003/dashboard_recuperacion_cu.git
 cd dashboard_recuperacion_cu
 
-
-docker build -t dashboard_recuperacion_cu .
-
-docker run -p 8501:8501 dashboard_recuperacion_cu
+docker compose up -d
 
