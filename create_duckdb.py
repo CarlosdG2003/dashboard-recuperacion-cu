@@ -4,7 +4,7 @@ import os
 import glob
 
 def build_duckdb():
-    """Construye base DuckDB desde todos los CSVs disponibles"""
+    """Construye o actualiza base DuckDB desde todos los CSVs disponibles"""
     
     os.makedirs("data", exist_ok=True)
     duckdb_path = "data/scada_recovery.duckdb"
@@ -19,9 +19,10 @@ def build_duckdb():
     # Tags necesarios
     copper_tags = ['PowerBi.COU1CD2001CU', 'PowerBi.COU1RD001CU', 'PowerBi.COU1CF001CU', 'PowerBi.COU1-RCT-CU']
     
+    # Conexión a DuckDB
     conn = duckdb.connect(duckdb_path)
     
-    # Crear tabla
+    # Crear tabla si no existe
     conn.execute("""
         CREATE TABLE IF NOT EXISTS copper_data (
             ts_origin TIMESTAMP,
@@ -30,7 +31,8 @@ def build_duckdb():
         )
     """)
     
-    conn.execute("DELETE FROM copper_data")
+    # Obtener última fecha ya registrada
+    last_ts = conn.execute("SELECT MAX(ts_origin) FROM copper_data").fetchone()[0]
     
     total_records = 0
     
@@ -41,14 +43,20 @@ def build_duckdb():
             
             if len(df_copper) > 0:
                 df_copper['ts_origin'] = pd.to_datetime(df_copper['ts_origin'])
-                conn.execute("INSERT INTO copper_data SELECT * FROM df_copper")
-                total_records += len(df_copper)
-                print(f"Procesado: {os.path.basename(csv_file)} - {len(df_copper)} registros")
+                
+                # Filtrar solo registros nuevos si ya hay datos
+                if last_ts is not None:
+                    df_copper = df_copper[df_copper['ts_origin'] > pd.to_datetime(last_ts)]
+                
+                if len(df_copper) > 0:
+                    conn.execute("INSERT INTO copper_data SELECT * FROM df_copper")
+                    total_records += len(df_copper)
+                    print(f"Procesado: {os.path.basename(csv_file)} - {len(df_copper)} registros")
             
         except Exception as e:
             print(f"Error en {csv_file}: {e}")
     
-    # Crear índice
+    # Crear índice si no existe
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ts_tag ON copper_data(ts_origin, tag_id)")
     
     # Resumen
@@ -56,10 +64,11 @@ def build_duckdb():
     conn.close()
     
     if total_records > 0:
-        print(f"Base creada: {summary[2]:,} registros ({summary[0]} a {summary[1]})")
+        print(f"Base actualizada: {summary[2]:,} registros ({summary[0]} a {summary[1]})")
         return True
-    
-    return False
+    else:
+        print("No se agregaron registros nuevos")
+        return True  # Devuelve True aunque no haya cambios para indicar que la DB está lista
 
 if __name__ == "__main__":
     if build_duckdb():

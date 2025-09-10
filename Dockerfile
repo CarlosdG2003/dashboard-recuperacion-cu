@@ -19,5 +19,5 @@ COPY . .
 # Exponer el puerto de Streamlit
 EXPOSE 8501
 
-# Ejecutar la app 
-CMD ["streamlit", "run", "src/app.py", "--server.address=0.0.0.0"]
+# Ejecutar la creación/actualización de DuckDB y luego Streamlit
+CMD python scripts/crear_duckdb.py && streamlit run src/app.py --server.address=0.0.0.0
