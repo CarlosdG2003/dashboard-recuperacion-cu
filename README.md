@@ -28,3 +28,4 @@ cd dashboard_recuperacion_cu
 
 docker compose up -d
 
+Accede al dashboard desde tu navegador: http://localhost:8501
