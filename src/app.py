@@ -42,27 +42,33 @@ def load_and_process_data(file_path):
         st.error(f"Error al cargar el archivo: {e}")
         return None
 
-@st.cache_data(ttl=900)  # Cache 15 minutos
+@st.cache_data(ttl=900)  # Cache 15 minutos 
 def load_from_duckdb(days_back=30, db_path="/app/data/scada_recovery.duckdb"):
     """Carga datos desde DuckDB"""
     if not DUCKDB_AVAILABLE:
         return None
-        
+    
     try:
         conn = duckdb.connect(db_path)
-        
+
+        # Obtener la última fecha disponible en la tabla
+        last_date = conn.execute("SELECT MAX(ts_origin) FROM copper_data").fetchone()[0]
+        if last_date is None:
+            st.warning("La tabla copper_data está vacía")
+            return None
+
         query = f"""
         SELECT 
             ts_origin,
             tag_id,
             value_ts
         FROM copper_data 
-        WHERE ts_origin >= current_date - interval '{days_back} days'
+        WHERE ts_origin >= DATE('{last_date}') - INTERVAL '{days_back} days'
         AND tag_id IN ('PowerBi.COU1CD2001CU', 'PowerBi.COU1RD001CU', 
                        'PowerBi.COU1CF001CU', 'PowerBi.COU1-RCT-CU')
         ORDER BY ts_origin, tag_id
         """
-        
+
         df = conn.execute(query).df()
         conn.close()
         
@@ -71,10 +77,11 @@ def load_from_duckdb(days_back=30, db_path="/app/data/scada_recovery.duckdb"):
             df['ts'] = df['ts_origin']
         
         return df
-        
+    
     except Exception as e:
         st.error(f"Error conectando a DuckDB: {e}")
         return None
+
 
 def create_15min_blocks(df):
     """Crea bloques de 15 minutos"""
@@ -453,7 +460,7 @@ def main():
             """)
             
             if duckdb_exists:
-                st.write("- Base de datos DuckDB (recomendado)")
+                st.write("- Base de datos DuckDB")
             if local_files:
                 st.write("- Archivos en servidor")
             st.write("- Subir archivo manual")
